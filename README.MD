@@ -35,6 +35,14 @@ First lets understand the SolidStart Data API. Please read each section carefull
 
 After learning the basics, ahead over to the [ToDo App](#todo-app) section to see how we can create a fully functioning app with Optimistic Updates & Server Actions in SolidStart.
 
+- [ToDo App](#todo-app)
+  - [Demo](#video)
+  - [Installation](#install)
+  - [Prefetching The ToDo List](#prefetching-the-todo-list)
+  - [Create ToDo](#create-todo-action)
+  - [Update Todo](#update-todo-status)
+    - [Optimistic Updates](#optimistic-updates-1)
+
 # Route Data
 
 When wanting to preload data or run some logic like protected route or setting cookies / headers, we can use the `preload` function to define a route data function
@@ -760,3 +768,232 @@ When calling this function with `FakeJD` as the name, all the properties will re
 # ToDo App
 
 Lets use what we learned and build a fully functioning ToDo App in SolidStart.
+
+## Install
+
+First, lets clone the ToDo app template (which already includes the db configuration):
+
+```sh
+git clone git@github.com:OrJDev/solidstart-data.git todo-app
+```
+
+After that intall the dependencies:
+
+```sh
+pnpm install
+```
+
+And then create a `.env` file with:
+
+```
+DATABASE_URL=file:./db.sqlite
+```
+
+## Video
+
+[![Demo](https://github.com/user-attachments/assets/a4581cfb-83b5-4fd1-a3b9-c4424ae56cc3)](https://github.com/user-attachments/assets/da621f3f-222c-426d-93ed-cc7ac5523dd6)
+
+We can start building the actual app.
+
+## Prefetching The ToDo List
+
+Ahead over to `routes/index.tsx` and add the following preload method (this is going to pre-load the todo list and trigger Suspense)
+
+First lets create the `getTodos` function, since we use the db directly to fetch the todos, we need to mark this function as server function:
+
+```ts
+import { db } from "~/server/db";
+import { cache } from "@solidjs/router";
+
+const getTodos = cache(async () => {
+  "use server";
+
+  return await db.todo.findMany();
+}, "todos");
+```
+
+After creating this function, we can use and export the `preload` method in order to load the todos list before the page is actually sent to the client:
+
+```ts
+export const route = {
+  async preload() {
+    await getTodos();
+  },
+};
+```
+
+We need to consume this function and trigger Suspense by using `createAsync`.
+
+```tsx
+import { createAsync } from "@solidjs/router";
+
+const Home: VoidComponent = () => {
+  const todos = createAsync(() => getTodos());
+  return (
+    <main class="flex min-h-screen flex-col gap-4 items-center py-12 bg-gradient-to-b from-[#026d56] to-[#152a2c]">
+      <div class="w-full flex gap-2 items-center justify-center flex-wrap">
+        <For each={actualToDos()}>
+          {(todo) => (
+            <div class="flex flex-col gap-2 items-center border p-3 border-gray-500 rounded-lg">
+              <span class="text-xl font-bold text-gray-300">{todo.text}</span>
+              <input type="checkbox" checked={todo.completed} />
+            </div>
+          )}
+        </For>
+      </div>
+    </main>
+  );
+};
+```
+
+By reading `todos()` we trigger suspense (as mentioned in the [createAsync](#createasync) guide).
+
+After that we can implement the `createToDo` action.
+
+## Create ToDo Action
+
+We are going to create a server action that takes in a formData, it validates that the formData has `text`, after that it creates a new todo with the provided text. Once the todo is created, we are to going to invalidate the `getTodos` method we preloaded eariler, meaning we are going to refetch the todo list . We are also going to wait 2 seconds before revalidation so we can see the optimistic updates in action.
+
+```ts
+import { revalidate, action } from "@solidjs/router";
+
+const createToDo = action(async (formData: FormData) => {
+  "use server";
+
+  const text = formData.get("text");
+  if (!text || typeof text !== "string") {
+    throw new Error("Missing Text");
+  }
+  await db.todo.create({ data: { text } });
+  await new Promise((res) =>
+    setTimeout(() => {
+      res(undefined);
+    }, 2000)
+  );
+  await revalidate(getTodos.key);
+}, "createToDo");
+```
+
+Having the action ready, we can create a form that will trigger this action:
+
+```tsx
+import { useSubmissions } from "@solidjs/router";
+import { createSignal } from "solid-js";
+
+const CreateToDo = () => {
+  const [text, setText] = createSignal("");
+  const createSubmissions = useSubmissions(createToDo);
+  return (
+    <form
+      action={createToDo}
+      method="post"
+      class="flex flex-col gap-4 items-center text-white text-lg"
+    >
+      <input
+        type="text"
+        placeholder="Text"
+        class="outline-none border-gray-400 bg-inherit border border-solid rounded-lg p-3 text-white font-bold"
+        name="text"
+        value={text()}
+        onChange={(e) => setText(e.currentTarget.value)}
+      />
+      <button
+        disabled={createSubmissions.pending}
+        type="submit"
+        class="font-bold text-2xl text-orange-400"
+      >
+        Create ToDo
+      </button>
+    </form>
+  );
+};
+```
+
+This form will be used to create new todos.
+
+## Update ToDo Status
+
+First lets create an action that takes in two args, one is the checked value (if the todo is completed or not) and the other is the id of the todo.
+
+```ts
+const update = action(async (chcked: boolean, id: string) => {
+  "use server";
+
+  await db.todo.update({
+    where: { id },
+    data: {
+      completed: chcked,
+    },
+  });
+  await new Promise((res) =>
+    setTimeout(() => {
+      res(undefined);
+    }, 2000)
+  );
+  await revalidate(getTodos.key);
+}, "updateToDo");
+```
+
+After creating this action, we can use it to update a todo. Since the todo completed value is stored within a `checkbox` we won't use a form but rather the `useAction` function, we will also be using the `useSubmissions` hook for optimistic updates & check if function is pending.
+
+First lets switch the way we render the current todo:
+
+```tsx
+import { useAction } from "@solidjs/router";
+
+const updateToDo = useAction(update);
+
+<For each={actualToDos()}>
+  {(todo) => (
+    <div class="flex flex-col gap-2 items-center border p-3 border-gray-500 rounded-lg">
+      <span class="text-xl font-bold text-gray-300">{todo.text}</span>
+      <input
+        onClick={(e) => {
+          e.preventDefault();
+          updateToDo(e.currentTarget.checked, todo.id);
+        }}
+        type="checkbox"
+        checked={todo.completed}
+        disabled={
+          !!updateSubmissions.find((e) => e.pending && e.input[1] === todo.id)
+        }
+      />
+    </div>
+  )}
+</For>;
+```
+
+We are using `e.preventDefault()` so it will not display the checkmark until the server has completed, also we are using `disabled={...}` to check if we are already trying to update the current todo by filtering the id & pending status.
+
+### Optimistic Updates
+
+Because we purposely added a timeout in the server to stimulate slow response, lets implement optimistic updates mechanism (predicting the response of the server) to make this faster. To achieve this, we are going to use the `useSubmissions` hook.
+
+```ts
+const updateSubmissions = useSubmissions(update);
+```
+
+Hvaing the submisions, we can create a new memo called `actualTodos` which will be a combination of the todos returned from the server & the optimistic todos.
+
+```ts
+import { createMemo } from "solid-js";
+
+const actualToDos = createMemo(() => {
+  const t = todos();
+  if (!updateSubmissions.pending) return t;
+  return t?.map((todo) => {
+    const exists = updateSubmissions.find(
+      (e) => e.pending && e.input[1] === todo.id
+    );
+    if (exists) {
+      return {
+        ...todo,
+        completed: exists.input[0],
+      };
+    }
+    return todo;
+  });
+});
+```
+
+We are checking if there are any update todo submissions, if not return the todos returned from the server. If there are, we are going to map the todos returned from the server and compare it with the submissions. We will search if `updateSubmissions` has a todo with the id of the current todo, if so return the input of it (the completed boolean).

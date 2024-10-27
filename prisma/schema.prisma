@@ -11,5 +11,5 @@ datasource db {
 model Todo {
     id   String @id @default(cuid())
     text String
-    completed Boolean
+    completed Boolean @default(false)
 }
